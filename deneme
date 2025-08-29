@@ -7,7 +7,7 @@ local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 
 -- Remove old GUIs
-if playerGui:FindFirstChild("DarkstealerV2_GUI") then
+if playerGui:FindFirstChild("SareNZL 2 PLAYER A CAR") then
     playerGui.DarkstealerV2_GUI:Destroy()
 end
 if playerGui:FindFirstChild("DarkstealerV2_Important") then
@@ -19,7 +19,7 @@ local copiedPosition = nil
 
 -- Main GUI
 local screenGui = Instance.new("ScreenGui")
-screenGui.Name = "DarkstealerV2_GUI"
+screenGui.Name = "SareNZL 2 PLAYER A CAR"
 screenGui.Parent = playerGui
 screenGui.ResetOnSpawn = false
 
@@ -471,4 +471,5 @@ importantLabel.TextWrapped = true
 importantLabel.TextYAlignment = Enum.TextYAlignment.Top
 
 print("[SareNZL] GUI Loaded")
+
 

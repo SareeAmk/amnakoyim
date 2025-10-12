@@ -1,0 +1,600 @@
+-- Advanced ESP + AimBot + Memory (single file)
+-- NOTE: Uses Drawing API (executor environment). Use in supported environment.
+
+-- Services
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local LocalPlayer = Players.LocalPlayer
+local Camera = workspace.CurrentCamera
+
+-- ====== Config / State ======
+local Config = {
+    -- Menu
+    MenuOpen = false,
+    MenuPos = UDim2.new(0.05, 0, 0.1, 0),
+
+    -- ESP defaults
+    ESP = {
+        Box = true, Line = true, Health = true, Name = true,
+        Skeleton = false, Distance = false, Vehicle = false,
+        HeadDot = false, TeamCheck = true, ColorByDistance = true
+    },
+
+    -- AimBot defaults
+    Aim = {
+        Enabled = false,
+        AimKeyHold = true,      -- if true: hold mouse2 to aim; if false: toggle with button
+        Key = Enum.UserInputType.MouseButton2, -- right click
+        FOV = 150,              -- pixels radius on screen
+        Smooth = 12,            -- larger = slower (1..50)
+        MaxDistance = 500,      -- studs
+        VisCheck = true,        -- raycast visibility
+        AimWhileVisibleOnly = true
+    },
+
+    -- Memory
+    Memory = {
+        SpeedHack = false,
+        JumpHack = false
+    },
+
+    -- Misc
+    RGBHue = 0
+}
+
+-- ====== Drawing helpers ======
+local DrawingSupported = (typeof(Drawing) == "table")
+local function newDrawing(kind)
+    if not DrawingSupported then return nil end
+    local ok, obj = pcall(function() return Drawing.new(kind) end)
+    if not ok then return nil end
+    return obj
+end
+
+-- center point
+local function center()
+    return Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y/2)
+end
+
+-- ====== ESP Class ======
+local ESPClass = {}
+ESPClass.__index = ESPClass
+
+function ESPClass.new(player)
+    local self = setmetatable({}, ESPClass)
+    self.Player = player
+    self.Character = player.Character
+    self.Root = self.Character and self.Character:FindFirstChild("HumanoidRootPart")
+    self.Head = self.Character and self.Character:FindFirstChild("Head")
+    self.Humanoid = self.Character and self.Character:FindFirstChildOfClass("Humanoid")
+
+    -- Drawings
+    self.box = newDrawing("Square")
+    self.tracer = newDrawing("Line")
+    self.hp = newDrawing("Square")
+    self.nameText = newDrawing("Text")
+    self.distText = newDrawing("Text")
+    self.headdot = newDrawing("Circle")
+    self.skelLines = {} -- optional
+
+    -- default draw settings
+    if self.box then
+        self.box.Visible = false
+        self.box.Thickness = 1
+    end
+    if self.tracer then
+        self.tracer.Visible = false
+        self.tracer.Thickness = 1
+    end
+    if self.hp then
+        self.hp.Visible = false
+        self.hp.Filled = true
+    end
+    if self.nameText then
+        self.nameText.Visible = false
+        self.nameText.Center = true
+        self.nameText.Outline = true
+    end
+    if self.distText then
+        self.distText.Visible = false
+        self.distText.Center = true
+        self.distText.Outline = true
+    end
+    if self.headdot then
+        self.headdot.Visible = false
+        self.headdot.Radius = 4
+    end
+
+    self.Enabled = {} -- per-instance flags mirror config
+    for k,v in pairs(Config.ESP) do self.Enabled[k] = v end
+
+    -- update loop
+    self.running = true
+    spawn(function() self:Run() end)
+    return self
+end
+
+function ESPClass:DestroyDrawings()
+    for _,d in pairs({self.box, self.tracer, self.hp, self.nameText, self.distText, self.headdot}) do
+        if d and type(d.Destroy) == "function" then
+            pcall(d.Destroy, d)
+        end
+    end
+    for _,ln in pairs(self.skelLines) do
+        if ln and type(ln.Destroy) == "function" then pcall(ln.Destroy, ln) end
+    end
+end
+
+function ESPClass:Run()
+    local lastCharacter = self.Player.Character
+    while self.running do
+        if not self.Player or not self.Player.Character then
+            -- hide
+            if self.box then self.box.Visible = false end
+            if self.tracer then self.tracer.Visible = false end
+            if self.hp then self.hp.Visible = false end
+            if self.nameText then self.nameText.Visible = false end
+            if self.distText then self.distText.Visible = false end
+            if self.headdot then self.headdot.Visible = false end
+            task.wait(0.5)
+        else
+            -- refresh refs
+            self.Character = self.Player.Character
+            self.Root = self.Character:FindFirstChild("HumanoidRootPart")
+            self.Head = self.Character:FindFirstChild("Head")
+            self.Humanoid = self.Character:FindFirstChildOfClass("Humanoid")
+            if not (self.Root and self.Head and self.Humanoid) then
+                task.wait(0.1)
+            else
+                -- world -> screen
+                local rootPos, onScreenRoot = Camera:WorldToViewportPoint(self.Root.Position)
+                local headPos, onScreenHead = Camera:WorldToViewportPoint(self.Head.Position)
+                if not onScreenRoot then
+                    if self.box then self.box.Visible = false end
+                    if self.tracer then self.tracer.Visible = false end
+                    if self.hp then self.hp.Visible = false end
+                    if self.nameText then self.nameText.Visible = false end
+                    if self.distText then self.distText.Visible = false end
+                    if self.headdot then self.headdot.Visible = false end
+                    task.wait(0.03)
+                else
+                    local height = math.abs(headPos.Y - rootPos.Y)
+                    local width = math.max(20, height/2)
+
+                    -- color by distance
+                    local color = Color3.fromRGB(255,255,255)
+                    if Config.ESP.ColorByDistance then
+                        local myroot = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+                        if myroot then
+                            local d = (myroot.Position - self.Root.Position).Magnitude
+                            local t = math.clamp(1 - (d / 500), 0, 1)
+                            color = Color3.new(1 - (1-t), t, 0) -- lerp red->green roughly
+                        end
+                    else
+                        color = Color3.new(1,1,1)
+                    end
+
+                    -- BOX
+                    if self.Enabled.Box and self.box then
+                        self.box.Visible = true
+                        self.box.Position = Vector2.new(rootPos.X - width/2, rootPos.Y)
+                        self.box.Size = Vector2.new(width, height)
+                        self.box.Color = color
+                    elseif self.box then
+                        self.box.Visible = false
+                    end
+
+                    -- TRACER
+                    if self.Enabled.Line and self.tracer then
+                        self.tracer.Visible = true
+                        self.tracer.From = center()
+                        self.tracer.To = Vector2.new(rootPos.X, rootPos.Y + height/2)
+                        self.tracer.Color = color
+                    elseif self.tracer then
+                        self.tracer.Visible = false
+                    end
+
+                    -- HEALTH
+                    if self.Enabled.Health and self.hp then
+                        local hpPercent = math.clamp(self.Humanoid.Health / math.max(1, self.Humanoid.MaxHealth), 0, 1)
+                        local barHeight = height * hpPercent
+                        self.hp.Visible = true
+                        self.hp.Position = Vector2.new(rootPos.X - width/2 - 6, rootPos.Y + height - barHeight)
+                        self.hp.Size = Vector2.new(5, barHeight)
+                        self.hp.Color = Color3.new(1-hpPercent, hpPercent, 0)
+                    elseif self.hp then
+                        self.hp.Visible = false
+                    end
+
+                    -- NAME
+                    if self.Enabled.Name and self.nameText then
+                        self.nameText.Visible = true
+                        self.nameText.Text = self.Player.Name
+                        self.nameText.Position = Vector2.new(rootPos.X, headPos.Y - 12)
+                        self.nameText.Color = Color3.new(1,1,1)
+                    elseif self.nameText then
+                        self.nameText.Visible = false
+                    end
+
+                    -- DISTANCE
+                    if self.Enabled.Distance and self.distText then
+                        self.distText.Visible = true
+                        local myroot = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+                        local dist = myroot and math.floor((myroot.Position - self.Root.Position).Magnitude) or 0
+                        self.distText.Text = "[" .. tostring(dist) .. "m]"
+                        self.distText.Position = Vector2.new(rootPos.X, rootPos.Y + height + 10)
+                        self.distText.Color = Color3.new(1,1,0)
+                    elseif self.distText then
+                        self.distText.Visible = false
+                    end
+
+                    -- HEAD DOT
+                    if self.Enabled.HeadDot and self.headdot then
+                        local headScreen = Vector2.new(headPos.X, headPos.Y)
+                        self.headdot.Visible = true
+                        self.headdot.Position = headScreen
+                        self.headdot.Color = color
+                    elseif self.headdot then
+                        self.headdot.Visible = false
+                    end
+
+                    task.wait(0.01)
+                end
+            end
+        end
+    end
+end
+
+-- manage esp instances
+local ESPs = {}
+local function ensureESPFor(player)
+    if player == LocalPlayer then return end
+    if ESPs[player] and ESPs[player].running then return end
+    ESPs[player] = ESPClass.new(player)
+end
+
+for _,p in ipairs(Players:GetPlayers()) do ensureESPFor(p) end
+Players.PlayerAdded:Connect(function(p) ensureESPFor(p) end)
+Players.PlayerRemoving:Connect(function(p)
+    if ESPs[p] then
+        ESPs[p].running = false
+        ESPs[p]:DestroyDrawings()
+        ESPs[p] = nil
+    end
+end)
+
+-- ====== AimBot helpers ======
+local function isVisibleToCamera(part)
+    if not part then return false end
+    local origin = Camera.CFrame.Position
+    local dir = (part.Position - origin)
+    local rayParams = RaycastParams.new()
+    rayParams.FilterDescendantsInstances = {LocalPlayer.Character}
+    rayParams.FilterType = Enum.RaycastFilterType.Blacklist
+    local result = workspace:Raycast(origin, dir.Unit * dir.Magnitude, rayParams)
+    if not result then return true end
+    return result.Instance:IsDescendantOf(part.Parent)
+end
+
+local function screenDistanceFromCenter(screenPos)
+    local c = center()
+    return (Vector2.new(screenPos.X, screenPos.Y) - c).Magnitude
+end
+
+local function getAimTarget()
+    local best, bestDist = nil, math.huge
+    if not LocalPlayer.Character or not LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then return nil end
+    for _,plr in pairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and plr.Character and plr.Character:FindFirstChild("Head") then
+            if Config.ESP.TeamCheck and LocalPlayer.Team and plr.Team and LocalPlayer.Team == plr.Team then
+                -- skip teammates if TeamCheck enabled
+            else
+                local head = plr.Character.Head
+                local screenPos, onScreen = Camera:WorldToViewportPoint(head.Position)
+                if onScreen then
+                    local sd = screenDistanceFromCenter(screenPos)
+                    local distStud = (LocalPlayer.Character.HumanoidRootPart.Position - head.Position).Magnitude
+                    if sd <= Config.Aim.FOV and distStud <= Config.Aim.MaxDistance then
+                        if Config.Aim.VisCheck then
+                            if not isVisibleToCamera(head) then
+                                -- not visible
+                            else
+                                if sd < bestDist then bestDist, best = sd, plr end
+                            end
+                        else
+                            if sd < bestDist then bestDist, best = sd, plr end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return best
+end
+
+-- Aim smooth function: interpolate camera lookAt
+local function aimAt(position, smooth)
+    local camPos = Camera.CFrame.Position
+    local targetCFrame = CFrame.new(camPos, position)
+    local alpha = math.clamp(1 / math.max(1, smooth), 0.01, 1) -- smooth param: larger => slower
+    Camera.CFrame = Camera.CFrame:Lerp(targetCFrame, alpha)
+end
+
+-- Draw FOV circle
+local fovCircle = newDrawing("Circle")
+if fovCircle then
+    fovCircle.Visible = false
+    fovCircle.Radius = Config.Aim.FOV
+    fovCircle.Thickness = 1
+end
+
+-- Aim loop
+RunService.RenderStepped:Connect(function()
+    -- update RGB Hue for title separately (if used)
+    Config.RGBHue = (Config.RGBHue + 0.5) % 360
+
+    -- update fov circle drawing
+    if fovCircle then
+        fovCircle.Visible = Config.Aim.Enabled
+        fovCircle.Position = center()
+        fovCircle.Radius = Config.Aim.FOV
+        -- color based on hue
+        local h = Config.RGBHue / 360
+        local c = Color3.fromHSV(h, 1, 1)
+        fovCircle.Color = c
+    end
+
+    -- Aim logic
+    local aiming = Config.Aim.Enabled and (Config.Aim.AimKeyHold == false or UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) or UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1))
+    -- if AimKeyHold true we check IsMouseButtonPressed; else if toggle mode Aim.Enabled controls
+    if Config.Aim.AimKeyHold == true then
+        aiming = Config.Aim.Enabled and UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+    else
+        aiming = Config.Aim.Enabled
+    end
+
+    if aiming then
+        local target = getAimTarget()
+        if target and target.Character and target.Character:FindFirstChild("Head") then
+            aimAt(target.Character.Head.Position, Config.Aim.Smooth)
+        end
+    end
+end)
+
+-- ====== UI ======
+local function makeLabel(parent, text, pos)
+    local l = Instance.new("TextLabel", parent)
+    l.Size = UDim2.new(0, 200, 0, 20)
+    l.Position = pos
+    l.BackgroundTransparency = 1
+    l.TextColor3 = Color3.new(1,1,1)
+    l.Font = Enum.Font.SourceSans
+    l.TextSize = 14
+    l.Text = text
+    return l
+end
+
+-- Main menu (small)
+local gui = Instance.new("ScreenGui", LocalPlayer:WaitForChild("PlayerGui"))
+gui.ResetOnSpawn = false
+
+local frame = Instance.new("Frame", gui)
+frame.Size = UDim2.new(0, 260, 0, 30)
+frame.Position = Config.MenuPos
+frame.BackgroundColor3 = Color3.fromRGB(30,30,30)
+frame.Active = true
+frame.Draggable = true
+
+local title = Instance.new("TextButton", frame)
+title.Size = UDim2.new(1,0,1,0)
+title.BackgroundColor3 = Color3.fromRGB(35,35,35)
+title.Font = Enum.Font.SourceSansBold
+title.TextSize = 16
+title.Text = "→ SareNZL"
+title.TextColor3 = Color3.fromRGB(255,255,255)
+
+-- expanded area (tabs)
+local content = Instance.new("Frame", frame)
+content.Size = UDim2.new(1,0,0,260)
+content.Position = UDim2.new(0,0,1,0)
+content.BackgroundColor3 = Color3.fromRGB(25,25,25)
+content.Visible = false
+
+-- header RGB effect
+spawn(function()
+    while true do
+        local h = (Config.RGBHue / 360) % 1
+        title.TextColor3 = Color3.fromHSV(h, 1, 1)
+        task.wait(0.03)
+    end
+end)
+
+-- toggle open/close
+title.MouseButton1Click:Connect(function()
+    Config.MenuOpen = not Config.MenuOpen
+    content.Visible = Config.MenuOpen
+    title.Text = Config.MenuOpen and "↓ SareNZL" or "→ SareNZL"
+    frame.Size = Config.MenuOpen and UDim2.new(0,260,0,290) or UDim2.new(0,260,0,30)
+end)
+
+-- shortcuts: Right -> open, Down -> close
+UserInputService.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    if input.KeyCode == Enum.KeyCode.Right then
+        Config.MenuOpen = true; content.Visible = true; title.Text = "↓ SareNZL"; frame.Size = UDim2.new(0,260,0,290)
+    elseif input.KeyCode == Enum.KeyCode.Down then
+        Config.MenuOpen = false; content.Visible = false; title.Text = "→ SareNZL"; frame.Size = UDim2.new(0,260,0,30)
+    end
+end)
+
+-- Tabs UI
+local tabBar = Instance.new("Frame", content)
+tabBar.Size = UDim2.new(1,0,0,30)
+tabBar.Position = UDim2.new(0,0,0,0)
+tabBar.BackgroundColor3 = Color3.fromRGB(40,40,40)
+
+local tabs = { "ESP", "AimBot", "Memory" }
+local tabFrames = {}
+local activeTab = "ESP"
+
+for i, name in ipairs(tabs) do
+    local b = Instance.new("TextButton", tabBar)
+    b.Size = UDim2.new(0, 80, 1, 0)
+    b.Position = UDim2.new(0, (i-1) * 85, 0, 0)
+    b.Text = name
+    b.BackgroundColor3 = Color3.fromRGB(60,60,60)
+    b.TextColor3 = Color3.new(1,1,1)
+    b.Font = Enum.Font.SourceSansBold
+
+    local tf = Instance.new("Frame", content)
+    tf.Size = UDim2.new(1,0,1,-30)
+    tf.Position = UDim2.new(0,0,0,30)
+    tf.BackgroundTransparency = 1
+    tf.Visible = (name == "ESP")
+    tabFrames[name] = tf
+
+    b.MouseButton1Click:Connect(function()
+        for _,f in pairs(tabFrames) do f.Visible = false end
+        tf.Visible = true
+        activeTab = name
+    end)
+end
+
+-- Helper to create toggle button in UI (text button)
+local function createToggle(parent, labelText, posY, initial, callback)
+    local btn = Instance.new("TextButton", parent)
+    btn.Position = UDim2.new(0, 10, 0, posY)
+    btn.Size = UDim2.new(0, 220, 0, 25)
+    btn.BackgroundColor3 = Color3.fromRGB(55,55,55)
+    btn.TextColor3 = Color3.new(1,1,1)
+    btn.Font = Enum.Font.SourceSans
+    btn.TextSize = 14
+    btn.Text = labelText .. (initial and ": ON" or ": OFF")
+    btn.MouseButton1Click:Connect(function()
+        initial = not initial
+        btn.Text = labelText .. (initial and ": ON" or ": OFF")
+        if callback then callback(initial) end
+    end)
+    return btn
+end
+
+-- ================= ESP tab content =================
+local espFrame = tabFrames["ESP"]
+
+-- Create checkboxes for configurable ESPS
+local espY = 8
+local function addESPOption(name, key)
+    createToggle(espFrame, name, espY, Config.ESP[key], function(state)
+        Config.ESP[key] = state
+        -- update existing instances
+        for _,inst in pairs(ESPs) do if inst and inst.Enabled then inst.Enabled[key] = state end end
+    end)
+    espY = espY + 30
+end
+
+addESPOption("Box", "Box")
+addESPOption("Line", "Line")
+addESPOption("Health", "Health")
+addESPOption("Name", "Name")
+addESPOption("Skeleton", "Skeleton")
+addESPOption("Distance", "Distance")
+addESPOption("Vehicle", "Vehicle")
+addESPOption("Head Dot", "HeadDot")
+addESPOption("Team Check", "TeamCheck")
+addESPOption("Color By Distance", "ColorByDistance")
+
+-- ================= AimBot tab content =================
+local aimFrame = tabFrames["AimBot"]
+do
+    local y = 8
+    local enableBtn = createToggle(aimFrame, "Aim Enabled", y, Config.Aim.Enabled, function(s) Config.Aim.Enabled = s end)
+    y = y + 30
+
+    -- AimKey mode toggle (hold vs toggle)
+    local keyModeBtn = createToggle(aimFrame, "AimKey Hold (RightClick)", y, Config.Aim.AimKeyHold, function(s)
+        Config.Aim.AimKeyHold = s
+    end)
+    y = y + 30
+
+    -- FOV display + +/- controls
+    local fovLabel = makeLabel(aimFrame, "FOV: " .. tostring(Config.Aim.FOV), UDim2.new(0,10,0,y))
+    local fovMinus = Instance.new("TextButton", aimFrame)
+    fovMinus.Text = "-"
+    fovMinus.Size = UDim2.new(0,30,0,20)
+    fovMinus.Position = UDim2.new(0,150,0,y)
+    fovMinus.MouseButton1Click:Connect(function()
+        Config.Aim.FOV = math.clamp(Config.Aim.FOV - 10, 20, 800)
+        fovLabel.Text = "FOV: " .. tostring(Config.Aim.FOV)
+    end)
+    local fovPlus = Instance.new("TextButton", aimFrame)
+    fovPlus.Text = "+"
+    fovPlus.Size = UDim2.new(0,30,0,20)
+    fovPlus.Position = UDim2.new(0,185,0,y)
+    fovPlus.MouseButton1Click:Connect(function()
+        Config.Aim.FOV = math.clamp(Config.Aim.FOV + 10, 20, 800)
+        fovLabel.Text = "FOV: " .. tostring(Config.Aim.FOV)
+    end)
+    y = y + 30
+
+    -- Smooth
+    local smoothLabel = makeLabel(aimFrame, "Smooth: " .. tostring(Config.Aim.Smooth), UDim2.new(0,10,0,y))
+    local sminus = Instance.new("TextButton", aimFrame); sminus.Text = "-"; sminus.Size = UDim2.new(0,30,0,20); sminus.Position = UDim2.new(0,150,0,y)
+    local splus  = Instance.new("TextButton", aimFrame); splus.Text = "+"; splus.Size = UDim2.new(0,30,0,20); splus.Position = UDim2.new(0,185,0,y)
+    sminus.MouseButton1Click:Connect(function() Config.Aim.Smooth = math.clamp(Config.Aim.Smooth - 1, 1, 100); smoothLabel.Text = "Smooth: "..tostring(Config.Aim.Smooth) end)
+    splus.MouseButton1Click:Connect(function() Config.Aim.Smooth = math.clamp(Config.Aim.Smooth + 1, 1, 100); smoothLabel.Text = "Smooth: "..tostring(Config.Aim.Smooth) end)
+    y = y + 30
+
+    -- Max distance
+    local distLabel = makeLabel(aimFrame, "MaxDist: " .. tostring(Config.Aim.MaxDistance), UDim2.new(0,10,0,y))
+    local dminus = Instance.new("TextButton", aimFrame); dminus.Text = "-"; dminus.Size = UDim2.new(0,30,0,20); dminus.Position = UDim2.new(0,150,0,y)
+    local dplus  = Instance.new("TextButton", aimFrame); dplus.Text = "+"; dplus.Size = UDim2.new(0,30,0,20); dplus.Position = UDim2.new(0,185,0,y)
+    dminus.MouseButton1Click:Connect(function() Config.Aim.MaxDistance = math.clamp(Config.Aim.MaxDistance - 50, 50, 5000); distLabel.Text = "MaxDist: "..tostring(Config.Aim.MaxDistance) end)
+    dplus.MouseButton1Click:Connect(function() Config.Aim.MaxDistance = math.clamp(Config.Aim.MaxDistance + 50, 50, 5000); distLabel.Text = "MaxDist: "..tostring(Config.Aim.MaxDistance) end)
+    y = y + 30
+
+    -- VisCheck
+    local visBtn = createToggle(aimFrame, "Visibility Check (Ray)", y, Config.Aim.VisCheck, function(s) Config.Aim.VisCheck = s end)
+    y = y + 30
+end
+
+-- ================= Memory tab content =================
+local memFrame = tabFrames["Memory"]
+do
+    local y = 8
+    createToggle(memFrame, "SpeedHack", y, Config.Memory.SpeedHack, function(s)
+        Config.Memory.SpeedHack = s
+        if LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid") then
+            LocalPlayer.Character:FindFirstChildOfClass("Humanoid").WalkSpeed = s and 50 or 16
+        end
+    end)
+    y = y + 32
+    createToggle(memFrame, "JumpHack", y, Config.Memory.JumpHack, function(s)
+        Config.Memory.JumpHack = s
+        if LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid") then
+            LocalPlayer.Character:FindFirstChildOfClass("Humanoid").JumpPower = s and 150 or 50
+        end
+    end)
+    y = y + 32
+    -- add more memory features here (noclip, fly etc.) if desired
+end
+
+-- Keep sync of per-instance Enabled flags if global Config changed (in case toggled elsewhere)
+spawn(function()
+    while true do
+        for _,inst in pairs(ESPs) do
+            if inst and inst.Enabled then
+                for k,v in pairs(Config.ESP) do
+                    inst.Enabled[k] = v
+                end
+            end
+        end
+        task.wait(0.5)
+    end
+end)
+
+-- Final notes text under menu
+local footer = makeLabel(content, "Use RightClick (hold) or toggle Aim Enabled.", UDim2.new(0,10,1,-20))
+
+-- Done
+print("[SareNZL] Script loaded. Open menu with Right Arrow / Close with Down Arrow.")
